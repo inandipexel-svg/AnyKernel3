@@ -1,0 +1,172 @@
+
+name: Migrate AnyKernel3
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Git LFS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs rsync
+          git lfs install
+
+      - name: Checkout migration workflow
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate migration
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          EXPECTED_SOURCE="a03corerooted-dev-ctrl/AnyKernel3"
+
+          if [ "$GITHUB_REPOSITORY" != "$EXPECTED_SOURCE" ]; then
+            echo "ERROR: Workflow running in wrong repository."
+            echo "Expected: $EXPECTED_SOURCE"
+            echo "Found: $GITHUB_REPOSITORY"
+            exit 1
+          fi
+
+          cp .github/workflows/migrate-anykernel3.yml \
+            "$RUNNER_TEMP/migrate-anykernel3.yml"
+
+          echo "Source repository validated."
+
+      - name: Validate destination
+        env:
+          MIGRATION_TOKEN: ${{ secrets.MIGRATION_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$MIGRATION_TOKEN" ]; then
+            echo "ERROR: MIGRATION_TOKEN secret is missing."
+            exit 1
+          fi
+
+          SOURCE_AUTH=$(printf 'x-access-token:%s' \
+            "$GITHUB_TOKEN" | base64 -w0)
+
+          TARGET_AUTH=$(printf 'x-access-token:%s' \
+            "$MIGRATION_TOKEN" | base64 -w0)
+
+          git ls-remote \
+            "https://github.com/inandipexel-svg/AnyKernel3.git" \
+            HEAD \
+            --exit-code \
+            >/dev/null 2>&1 || {
+              echo "ERROR: Destination repository is missing or inaccessible."
+              exit 1
+            }
+
+          for branch in Hysteris MIUIxShockwave; do
+            if git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $TARGET_AUTH" \
+              ls-remote --exit-code \
+              "https://github.com/inandipexel-svg/AnyKernel3.git" \
+              "refs/heads/$branch" >/dev/null 2>&1; then
+              echo "ERROR: Destination branch $branch already exists."
+              exit 1
+            fi
+          done
+
+          echo "Destination validated successfully."
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Import branches
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MIGRATION_TOKEN: ${{ secrets.MIGRATION_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          SOURCE_REPO="a03corerooted-dev-ctrl/AnyKernel3"
+          DEST_REPO="inandipexel-svg/AnyKernel3"
+
+          SOURCE_AUTH=$(printf 'x-access-token:%s' \
+            "$GITHUB_TOKEN" | base64 -w0)
+
+          TARGET_AUTH=$(printf 'x-access-token:%s' \
+            "$MIGRATION_TOKEN" | base64 -w0)
+
+          for BRANCH in Hysteris MIUIxShockwave; do
+            echo "========================================"
+            echo "Migrating branch: $BRANCH"
+            echo "========================================"
+
+            SOURCE_DIR="$RUNNER_TEMP/source-$BRANCH"
+            SNAPSHOT_DIR="$RUNNER_TEMP/snapshot-$BRANCH"
+
+            rm -rf "$SOURCE_DIR" "$SNAPSHOT_DIR"
+
+            git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $SOURCE_AUTH" \
+              clone --depth 1 --single-branch \
+              --branch "$BRANCH" \
+              "https://github.com/$SOURCE_REPO.git" \
+              "$SOURCE_DIR"
+
+            git -C "$SOURCE_DIR" config \
+              http.https://github.com/.extraheader \
+              "AUTHORIZATION: basic $SOURCE_AUTH"
+
+            git -C "$SOURCE_DIR" lfs pull
+
+            SOURCE_COMMIT=$(git -C "$SOURCE_DIR" rev-parse HEAD)
+
+            mkdir -p "$SNAPSHOT_DIR"
+
+            rsync -a --exclude='.git' \
+              "$SOURCE_DIR/" \
+              "$SNAPSHOT_DIR/"
+
+            cp "$RUNNER_TEMP/migrate-anykernel3.yml" \
+              "$SNAPSHOT_DIR/.github/workflows/migrate-anykernel3.yml"
+
+            cd "$SNAPSHOT_DIR"
+
+            git init -b "$BRANCH"
+            git lfs install --local
+
+            git config user.name "github-actions[bot]"
+            git config user.email \
+              "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add --all
+
+            git commit -m "Initial AnyKernel3 snapshot from $BRANCH"
+
+            git remote add origin \
+              "https://github.com/$DEST_REPO.git"
+
+            git config http.https://github.com/.extraheader \
+              "AUTHORIZATION: basic $TARGET_AUTH"
+
+            echo "Uploading Git LFS objects..."
+            git lfs push --all origin
+
+            echo "Pushing branch $BRANCH..."
+            git push origin "HEAD:refs/heads/$BRANCH"
+
+            DEST_COMMIT=$(git rev-parse HEAD)
+
+            echo "----------------------------------------"
+            echo "Branch: $BRANCH"
+            echo "Source commit: $SOURCE_COMMIT"
+            echo "Destination commit: $DEST_COMMIT"
+            echo "Migration successful."
+            echo "----------------------------------------"
+
+            cd "$GITHUB_WORKSPACE"
+          done
+
+          echo "All AnyKernel3 branches migrated successfully."
