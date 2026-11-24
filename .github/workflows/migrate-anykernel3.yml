@@ -1,11 +1,10 @@
-
-name: Migrate AnyKernel3
+name: Migrate AnyKernel3 Branches
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   migrate:
@@ -20,121 +19,80 @@ jobs:
 
       - name: Checkout migration workflow
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
 
-      - name: Validate migration
+      - name: Validate destination
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
 
-          EXPECTED_SOURCE="a03corerooted-dev-ctrl/AnyKernel3"
+          EXPECTED_REPOSITORY="inandipexel-svg/AnyKernel3"
 
-          if [ "$GITHUB_REPOSITORY" != "$EXPECTED_SOURCE" ]; then
-            echo "ERROR: Workflow running in wrong repository."
-            echo "Expected: $EXPECTED_SOURCE"
+          if [ "$GITHUB_REPOSITORY" != "$EXPECTED_REPOSITORY" ]; then
+            echo "ERROR: Workflow is running in the wrong repository."
+            echo "Expected: $EXPECTED_REPOSITORY"
             echo "Found: $GITHUB_REPOSITORY"
             exit 1
           fi
 
-          cp .github/workflows/migrate-anykernel3.yml \
-            "$RUNNER_TEMP/migrate-anykernel3.yml"
-
-          echo "Source repository validated."
-
-      - name: Validate destination
-        env:
-          MIGRATION_TOKEN: ${{ secrets.MIGRATION_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "$MIGRATION_TOKEN" ]; then
-            echo "ERROR: MIGRATION_TOKEN secret is missing."
-            exit 1
-          fi
-
-          SOURCE_AUTH=$(printf 'x-access-token:%s' \
-            "$GITHUB_TOKEN" | base64 -w0)
-
-          TARGET_AUTH=$(printf 'x-access-token:%s' \
-            "$MIGRATION_TOKEN" | base64 -w0)
-
-          git ls-remote \
-            "https://github.com/inandipexel-svg/AnyKernel3.git" \
-            HEAD \
-            --exit-code \
-            >/dev/null 2>&1 || {
-              echo "ERROR: Destination repository is missing or inaccessible."
-              exit 1
-            }
-
           for branch in Hysteris MIUIxShockwave; do
-            if git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $TARGET_AUTH" \
-              ls-remote --exit-code \
-              "https://github.com/inandipexel-svg/AnyKernel3.git" \
-              "refs/heads/$branch" >/dev/null 2>&1; then
-              echo "ERROR: Destination branch $branch already exists."
+            REMOTE_BRANCH=$(git ls-remote origin "refs/heads/$branch")
+
+            if [ -n "$REMOTE_BRANCH" ]; then
+              echo "ERROR: Branch $branch already exists in destination."
+              echo "Refusing to overwrite existing data."
               exit 1
             fi
           done
 
-          echo "Destination validated successfully."
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+          mkdir -p "$RUNNER_TEMP/migration"
 
-      - name: Import branches
+          cp .github/workflows/migrate-anykernel3.yml \
+            "$RUNNER_TEMP/migration/migrate-anykernel3.yml"
+
+          echo "Destination validated successfully."
+
+      - name: Prepare source snapshots
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          MIGRATION_TOKEN: ${{ secrets.MIGRATION_TOKEN }}
+          SOURCE_REPOSITORY: a03corerooted-dev-ctrl/AnyKernel3
         run: |
           set -euo pipefail
 
-          SOURCE_REPO="a03corerooted-dev-ctrl/AnyKernel3"
-          DEST_REPO="inandipexel-svg/AnyKernel3"
+          for branch in Hysteris MIUIxShockwave; do
+            echo "::group::Preparing $branch"
 
-          SOURCE_AUTH=$(printf 'x-access-token:%s' \
-            "$GITHUB_TOKEN" | base64 -w0)
+            SOURCE_DIR="$RUNNER_TEMP/source-$branch"
+            SNAPSHOT_DIR="$RUNNER_TEMP/snapshot-$branch"
 
-          TARGET_AUTH=$(printf 'x-access-token:%s' \
-            "$MIGRATION_TOKEN" | base64 -w0)
+            mkdir -p "$SNAPSHOT_DIR"
 
-          for BRANCH in Hysteris MIUIxShockwave; do
-            echo "========================================"
-            echo "Migrating branch: $BRANCH"
-            echo "========================================"
+            echo "Cloning source branch: $branch"
 
-            SOURCE_DIR="$RUNNER_TEMP/source-$BRANCH"
-            SNAPSHOT_DIR="$RUNNER_TEMP/snapshot-$BRANCH"
-
-            rm -rf "$SOURCE_DIR" "$SNAPSHOT_DIR"
-
-            git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $SOURCE_AUTH" \
-              clone --depth 1 --single-branch \
-              --branch "$BRANCH" \
-              "https://github.com/$SOURCE_REPO.git" \
+            git clone --depth 1 --single-branch \
+              --branch "$branch" \
+              "https://github.com/${SOURCE_REPOSITORY}.git" \
               "$SOURCE_DIR"
-
-            git -C "$SOURCE_DIR" config \
-              http.https://github.com/.extraheader \
-              "AUTHORIZATION: basic $SOURCE_AUTH"
 
             git -C "$SOURCE_DIR" lfs pull
 
             SOURCE_COMMIT=$(git -C "$SOURCE_DIR" rev-parse HEAD)
 
-            mkdir -p "$SNAPSHOT_DIR"
+            echo "Source commit: $SOURCE_COMMIT"
 
             rsync -a --exclude='.git' \
               "$SOURCE_DIR/" \
               "$SNAPSHOT_DIR/"
 
-            cp "$RUNNER_TEMP/migrate-anykernel3.yml" \
+            rm -f "$SNAPSHOT_DIR/.lfsconfig"
+
+            mkdir -p "$SNAPSHOT_DIR/.github/workflows"
+
+            cp "$RUNNER_TEMP/migration/migrate-anykernel3.yml" \
               "$SNAPSHOT_DIR/.github/workflows/migrate-anykernel3.yml"
 
             cd "$SNAPSHOT_DIR"
 
-            git init -b "$BRANCH"
+            git init -b "$branch"
             git lfs install --local
 
             git config user.name "github-actions[bot]"
@@ -142,31 +100,67 @@ jobs:
               "41898282+github-actions[bot]@users.noreply.github.com"
 
             git add --all
+            git commit -m "Initial AnyKernel3 snapshot from $branch"
 
-            git commit -m "Initial AnyKernel3 snapshot from $BRANCH"
+            DESTINATION_COMMIT=$(git rev-parse HEAD)
 
-            git remote add origin \
-              "https://github.com/$DEST_REPO.git"
+            echo "SOURCE_COMMIT_${branch}=$SOURCE_COMMIT" >> "$GITHUB_ENV"
+            echo "DESTINATION_COMMIT_${branch}=$DESTINATION_COMMIT" >> "$GITHUB_ENV"
 
-            git config http.https://github.com/.extraheader \
-              "AUTHORIZATION: basic $TARGET_AUTH"
-
-            echo "Uploading Git LFS objects..."
-            git lfs push --all origin
-
-            echo "Pushing branch $BRANCH..."
-            git push origin "HEAD:refs/heads/$BRANCH"
-
-            DEST_COMMIT=$(git rev-parse HEAD)
-
-            echo "----------------------------------------"
-            echo "Branch: $BRANCH"
-            echo "Source commit: $SOURCE_COMMIT"
-            echo "Destination commit: $DEST_COMMIT"
-            echo "Migration successful."
-            echo "----------------------------------------"
-
-            cd "$GITHUB_WORKSPACE"
+            echo "Snapshot prepared successfully: $branch"
+            echo "::endgroup::"
           done
 
-          echo "All AnyKernel3 branches migrated successfully."
+      - name: Push snapshots to destination
+        env:
+          MIGRATION_TOKEN: ${{ secrets.MIGRATION_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$MIGRATION_TOKEN" ]; then
+            echo "ERROR: MIGRATION_TOKEN secret is missing or empty."
+            exit 1
+          fi
+
+          AUTH=$(printf 'x-access-token:%s' "$MIGRATION_TOKEN" | base64 -w0)
+          HEADER="AUTHORIZATION: basic $AUTH"
+
+          for branch in Hysteris MIUIxShockwave; do
+            echo "::group::Pushing $branch"
+
+            SNAPSHOT_DIR="$RUNNER_TEMP/snapshot-$branch"
+
+            git -C "$SNAPSHOT_DIR" remote add origin \
+              "https://github.com/${GITHUB_REPOSITORY}.git"
+
+            git -C "$SNAPSHOT_DIR" \
+              config http.https://github.com/.extraheader "$HEADER"
+
+            echo "Uploading Git LFS objects for $branch..."
+
+            git -C "$SNAPSHOT_DIR" lfs push --all origin
+
+            echo "Pushing branch $branch..."
+
+            git -C "$SNAPSHOT_DIR" \
+              push origin "HEAD:refs/heads/$branch"
+
+            echo "Successfully imported $branch."
+            echo "::endgroup::"
+          done
+
+          echo ""
+          echo "========================================"
+          echo "ANYKERNEL3 MIGRATION COMPLETED"
+          echo "========================================"
+
+          echo ""
+          echo "Hysteris:"
+          echo "  Source:      $SOURCE_COMMIT_Hysteris"
+          echo "  Destination: $DESTINATION_COMMIT_Hysteris"
+
+          echo ""
+          echo "MIUIxShockwave:"
+          echo "  Source:      $SOURCE_COMMIT_MIUIxShockwave"
+          echo "  Destination: $DESTINATION_COMMIT_MIUIxShockwave"
