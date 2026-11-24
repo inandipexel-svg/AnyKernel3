@@ -1,0 +1,166 @@
+name: Migrate AnyKernel3 Branches
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Git LFS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs rsync
+          git lfs install
+
+      - name: Checkout migration workflow
+        uses: actions/checkout@v4
+
+      - name: Validate destination
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          EXPECTED_REPOSITORY="inandipexel-svg/AnyKernel3"
+
+          if [ "$GITHUB_REPOSITORY" != "$EXPECTED_REPOSITORY" ]; then
+            echo "ERROR: Workflow is running in the wrong repository."
+            echo "Expected: $EXPECTED_REPOSITORY"
+            echo "Found: $GITHUB_REPOSITORY"
+            exit 1
+          fi
+
+          for branch in Hysteris MIUIxShockwave; do
+            REMOTE_BRANCH=$(git ls-remote origin "refs/heads/$branch")
+
+            if [ -n "$REMOTE_BRANCH" ]; then
+              echo "ERROR: Branch $branch already exists in destination."
+              echo "Refusing to overwrite existing data."
+              exit 1
+            fi
+          done
+
+          mkdir -p "$RUNNER_TEMP/migration"
+
+          cp .github/workflows/migrate-anykernel3.yml \
+            "$RUNNER_TEMP/migration/migrate-anykernel3.yml"
+
+          echo "Destination validated successfully."
+
+      - name: Prepare source snapshots
+        env:
+          SOURCE_REPOSITORY: a03corerooted-dev-ctrl/AnyKernel3
+        run: |
+          set -euo pipefail
+
+          for branch in Hysteris MIUIxShockwave; do
+            echo "::group::Preparing $branch"
+
+            SOURCE_DIR="$RUNNER_TEMP/source-$branch"
+            SNAPSHOT_DIR="$RUNNER_TEMP/snapshot-$branch"
+
+            mkdir -p "$SNAPSHOT_DIR"
+
+            echo "Cloning source branch: $branch"
+
+            git clone --depth 1 --single-branch \
+              --branch "$branch" \
+              "https://github.com/${SOURCE_REPOSITORY}.git" \
+              "$SOURCE_DIR"
+
+            git -C "$SOURCE_DIR" lfs pull
+
+            SOURCE_COMMIT=$(git -C "$SOURCE_DIR" rev-parse HEAD)
+
+            echo "Source commit: $SOURCE_COMMIT"
+
+            rsync -a --exclude='.git' \
+              "$SOURCE_DIR/" \
+              "$SNAPSHOT_DIR/"
+
+            rm -f "$SNAPSHOT_DIR/.lfsconfig"
+
+            mkdir -p "$SNAPSHOT_DIR/.github/workflows"
+
+            cp "$RUNNER_TEMP/migration/migrate-anykernel3.yml" \
+              "$SNAPSHOT_DIR/.github/workflows/migrate-anykernel3.yml"
+
+            cd "$SNAPSHOT_DIR"
+
+            git init -b "$branch"
+            git lfs install --local
+
+            git config user.name "github-actions[bot]"
+            git config user.email \
+              "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add --all
+            git commit -m "Initial AnyKernel3 snapshot from $branch"
+
+            DESTINATION_COMMIT=$(git rev-parse HEAD)
+
+            echo "SOURCE_COMMIT_${branch}=$SOURCE_COMMIT" >> "$GITHUB_ENV"
+            echo "DESTINATION_COMMIT_${branch}=$DESTINATION_COMMIT" >> "$GITHUB_ENV"
+
+            echo "Snapshot prepared successfully: $branch"
+            echo "::endgroup::"
+          done
+
+      - name: Push snapshots to destination
+        env:
+          MIGRATION_TOKEN: ${{ secrets.MIGRATION_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$MIGRATION_TOKEN" ]; then
+            echo "ERROR: MIGRATION_TOKEN secret is missing or empty."
+            exit 1
+          fi
+
+          AUTH=$(printf 'x-access-token:%s' "$MIGRATION_TOKEN" | base64 -w0)
+          HEADER="AUTHORIZATION: basic $AUTH"
+
+          for branch in Hysteris MIUIxShockwave; do
+            echo "::group::Pushing $branch"
+
+            SNAPSHOT_DIR="$RUNNER_TEMP/snapshot-$branch"
+
+            git -C "$SNAPSHOT_DIR" remote add origin \
+              "https://github.com/${GITHUB_REPOSITORY}.git"
+
+            git -C "$SNAPSHOT_DIR" \
+              config http.https://github.com/.extraheader "$HEADER"
+
+            echo "Uploading Git LFS objects for $branch..."
+
+            git -C "$SNAPSHOT_DIR" lfs push --all origin
+
+            echo "Pushing branch $branch..."
+
+            git -C "$SNAPSHOT_DIR" \
+              push origin "HEAD:refs/heads/$branch"
+
+            echo "Successfully imported $branch."
+            echo "::endgroup::"
+          done
+
+          echo ""
+          echo "========================================"
+          echo "ANYKERNEL3 MIGRATION COMPLETED"
+          echo "========================================"
+
+          echo ""
+          echo "Hysteris:"
+          echo "  Source:      $SOURCE_COMMIT_Hysteris"
+          echo "  Destination: $DESTINATION_COMMIT_Hysteris"
+
+          echo ""
+          echo "MIUIxShockwave:"
+          echo "  Source:      $SOURCE_COMMIT_MIUIxShockwave"
+          echo "  Destination: $DESTINATION_COMMIT_MIUIxShockwave"
