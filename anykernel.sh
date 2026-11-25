@@ -1,10 +1,10 @@
-### HysterisPlus AnyKernel3 Installer
+### Astralis Kernel Installer
 ## osm0sis @ xda-developers
 
 ### AnyKernel setup
 # begin properties
 properties() { '
-kernel.string=HysterisPlus Kernel by @a03corerooted-dev-ctrl
+kernel.string=Astralis Kernel
 do.devicecheck=0
 do.modules=0
 do.systemless=1
